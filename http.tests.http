@@ -1,0 +1,14 @@
+### Get
+GET http://localhost:3000/10 HTTP/1.1
+
+### Put
+PUT http://localhost:3000/10 HTTP/1.1
+content-type: application/json
+
+{ "name": "Darth Vitor" }
+
+### Post
+POST http://localhost:3000 HTTP/1.1
+content-type: application/json
+
+{ "name": "Darth Vitor" }
