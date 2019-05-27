@@ -6,12 +6,12 @@ import { TaskEither, fromEither } from "fp-ts/lib/TaskEither"
 import { right } from "fp-ts/lib/Either"
 import { IntegerFromString } from "io-ts-types"
 
-interface HttpResponse<T = unknown> {
+interface TypedResponse<T = unknown> {
   status: number
   body?: T
 }
 
-interface DecodedRequest<P, B> {
+interface TypedRequest<P, B> {
   params: P
   body: B
 }
@@ -19,31 +19,32 @@ type ValidatedRequest<P, B> = Pick<
   Request,
   Exclude<keyof Request, ["body", "params"]>
 > &
-  DecodedRequest<P, B>
+  TypedRequest<P, B>
 
-type TypedHandler = <P, B, O>(
-  decoder: t.Decoder<unknown, DecodedRequest<P, B>>,
-) => (
+type RequestType = "get" | "post" | "put"
+
+interface RequestContract<P, B> {
+  type: RequestType
+  decoder: t.Decoder<unknown, TypedRequest<P, B>>
+}
+
+type TypedHandler<P, B, O> = (
   path: PathParams,
   handler: (
-    req: DecodedRequest<P, B>,
-  ) => TaskEither<HttpResponse<string>, HttpResponse<O>>,
+    req: TypedRequest<P, B>,
+  ) => TaskEither<TypedResponse<string>, TypedResponse<O>>,
 ) => void
 
 interface ExpressM {
-  readonly getM: TypedHandler
-  readonly postM: TypedHandler
-  readonly putM: TypedHandler
+  serve: <P, B, O>(contract: RequestContract<P, B>) => TypedHandler<P, B, O>
 }
 
-export type EnhancedExpress = Express & ExpressM
-
-const aggregateErrors = (errors: t.Errors): HttpResponse => ({
+const aggregateErrors = (errors: t.Errors): TypedResponse => ({
   status: 400,
   body: errors.map(e => e.message).join("\n"),
 })
 
-const writeToResponse = (res: Response) => (data: HttpResponse) => {
+const writeToResponse = (res: Response) => (data: TypedResponse) => {
   res.status(data.status)
   res.send(
     typeof data.body === "string" ? data.body : JSON.stringify(data.body),
@@ -54,14 +55,14 @@ const decode = <I, O>(decoder: t.Decoder<I, O>, input: I) =>
   fromEither(decoder.decode(input))
 
 const mergeDecoded = (req: Request) => <P, B>(
-  decoded: DecodedRequest<P, B>,
+  decoded: TypedRequest<P, B>,
 ): ValidatedRequest<P, B> => Object.assign({}, req, decoded)
 
 const handleRequest = <P, B, O>(
-  decoder: t.Decoder<unknown, DecodedRequest<P, B>>,
+  decoder: t.Decoder<unknown, TypedRequest<P, B>>,
   handler: (
-    req: DecodedRequest<P, B>,
-  ) => TaskEither<HttpResponse<string>, HttpResponse<O>>,
+    req: TypedRequest<P, B>,
+  ) => TaskEither<TypedResponse<string>, TypedResponse<O>>,
 ): RequestHandler => (req, res) =>
   decode(decoder, req)
     .bimap(aggregateErrors, mergeDecoded(req))
@@ -69,47 +70,59 @@ const handleRequest = <P, B, O>(
     .fold(writeToResponse(res), writeToResponse(res))
     .run()
 
-export const wrap: (app: Express) => EnhancedExpress = app =>
+export const wrap = (app: Express) =>
   Object.assign<Express, ExpressM>(app, {
-    postM: decoder => (path, handler) =>
-      app.post(path, handleRequest(decoder, handler)),
-    putM: decoder => (path, handler) =>
-      app.put(path, handleRequest(decoder, handler)),
-    getM: decoder => (path, handler) =>
-      app.get(path, handleRequest(decoder, handler)),
+    serve: <P, B, O>(contract: RequestContract<P, B>) => (
+      path: PathParams,
+      handler: (
+        req: TypedRequest<P, B>,
+      ) => TaskEither<TypedResponse<string>, TypedResponse<O>>,
+    ) => {
+      app[contract.type](path, handleRequest(contract.decoder, handler))
+    },
   })
 
 const app = wrap(express())
 const port = 3000
 
-const GetRequest = t.interface({
-  params: t.interface({ id: IntegerFromString }),
-  body: t.any,
-})
-const PostRequest = t.interface({
-  params: t.unknown,
-  body: t.interface({ name: t.string }),
-})
-const PutRequest = t.interface({
-  params: t.interface({ id: IntegerFromString }),
-  body: t.interface({ name: t.string }),
-})
-type PutRequest = t.TypeOf<typeof PutRequest>
+const GetRequest = {
+  type: "get" as RequestType,
+  decoder: t.interface({
+    params: t.interface({ id: IntegerFromString }),
+    body: t.any,
+  }),
+}
+const PostRequest = {
+  type: "post" as RequestType,
+  decoder: t.interface({
+    params: t.unknown,
+    body: t.interface({ name: t.string }),
+  }),
+}
+const PutRequest = {
+  type: "put" as RequestType,
+  decoder: t.interface({
+    params: t.interface({ id: IntegerFromString }),
+    body: t.interface({ name: t.string }),
+  }),
+}
 
 app.use(express.json())
 
-app.postM(PostRequest)("/", () =>
+app.serve(GetRequest)("/:id", req =>
+  fromEither(right({ status: 200, body: { res: req.params.id } })),
+)
+
+app.serve(PostRequest)("/", () =>
   fromEither(
     right({ status: 200, body: { id: Math.floor(Math.random() * 1000) } }),
   ),
 )
-app.putM(PutRequest)("/:id", req =>
+
+app.serve(PutRequest)("/:id", req =>
   fromEither(
     right({ status: 200, body: { id: req.params.id, result: req.body.name } }),
   ),
-)
-app.getM(GetRequest)("/:id", req =>
-  fromEither(right({ status: 200, body: { res: req.params.id } })),
 )
 
 app.listen(port, () => console.log(`Example app listening on port ${port}!`))
